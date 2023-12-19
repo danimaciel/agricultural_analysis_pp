@@ -1,0 +1,879 @@
+---
+title: "Impacto de Políticas Públicas para Agricultura"
+author: "Daniela Maciel"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+    html_document:
+       code_folding: hide
+       highlight: textmate
+       theme: flatly
+       number_sections: yes
+       toc: yes
+       toc_float:
+         collapsed: yes
+         smooth_scroll: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+pacotes <- c("htmltools", "slickR", "RTextTools", "textrank", "tibble", "gt", "ggplot2", "tidyverse", "dplyr", "stringi", "readr","writexl", "topicmodels", "tm", "readxl", "textplot", "XML", "readxl", "topicmodels", "caret", "tidyr", "quanteda","pdftools","stringr","NLP","curl", "tidytext", "wordcloud", "SnowballC", "stopwords", "tm", "RColorBrewer", "cluster", "factoextra", "knitr", "wordcloud2", "gridExtra", "plotly", "ggwordcloud", "webshot2", "htmlwidgets")
+
+for (pacote in pacotes) {
+  if (!require(pacote, character.only = TRUE)) {
+    install.packages(pacote)
+    library(pacote, character.only = TRUE)
+  }
+}
+
+```
+# Objetivo do trabalho
+
+Investigar e identificar padrões, tendências e lacunas na literatura sobre avaliações de impacto de políticas públicas agrícolas, utilizando modelagem de tópicos e tokenização para revelar métodos e temas dominantes, bem como áreas emergentes que possam ser exploradas em futuras pesquisas e políticas.
+
+
+# Dados da Scopus
+String de busca: "TITLE-ABS-KEY ( agric*  AND  "public polic*"  AND  ( "impact"  OR  "evaluat*"  OR  "assess*"  OR  "ex ante"  OR  "ex post" ) )". Total recuperado: 2.624.
+
+```{r, warning=TRUE}
+pp1 <- read_csv("dados_brutos/pp_scopus1.csv")
+pp2 <- read_csv("dados_brutos/pp_scopus2.csv")
+pp_scopus <- rbind(pp1, pp2)
+pp_scopus <- as.data.frame(pp_scopus)
+pp_scopus <- pp_scopus %>% filter(`Language of Original Document` == "English") # 267 eliminados
+
+```
+## Verificação de duplicidades da Scopus
+
+```{r, warning=FALSE}
+
+pp_scopus <- pp_scopus[!duplicated(pp_scopus$Title), ] # Com 10 títulos duplicados
+
+```
+# Dados da Web of Science
+
+String de busca: "TS=(agric* AND "public polic*" AND ("impact" OR "evaluat*" OR "assess*" OR "ex ante" OR "ex post"))". Total recuperado: 791.
+
+```{r, warning=FALSE}
+## Criando função para TSV -------------------------------------------------
+
+siglas_to_names <- function(wos_pp, dicionario) {
+  tsv <- rbind(dicionario, c("C3", "Affiliation"))
+  wos_tsv <- wos_pp[, !names(wos_pp) %in% c("FP", "DL", "WE") ]
+  table(names(wos_tsv) %in% tsv$sigla)
+  names(wos_tsv) <- tsv$nome[match(x = names(wos_tsv), table = tsv$sigla)]
+  return(wos_tsv)
+  
+}
+
+# Web of Science - TSV ----------------------------------------------------
+wos_pp <- read_delim("dados_brutos/wos_pp.txt", delim = "\t")
+dicionario <- read_excel("dados_brutos/wos_tsv.xlsx")
+wos_tsv <- siglas_to_names(wos_pp, dicionario)
+wos_tsv <- wos_tsv %>% filter(Language == "English") # 85 elminados
+
+```
+
+
+## Verificação de duplicidades da Web of Science
+
+```{r, warning=FALSE}
+
+pp_wos_dupl <- wos_tsv[!duplicated(wos_tsv$`Document Title`), ] # Sem duplicidades
+
+```
+# Definição das variáveis para ambas as bases
+
+Definição das variáveis de interesse, quais sejam: Autor, Título, Afiliação, Abstract, Palavra-chave, Palavra-chave Autor, Ano, Fonte, Tipo de documento e Base.
+Cada arquivo ficará com o quantitativo de suas observações (Scopus = 2614; WoS = 791) e as nove variáveis declaradas anteriormente.
+
+```{r, warning=FALSE}
+
+## Scopus
+pp_scopus_col <- pp_scopus[, colnames(pp_scopus) %in% c("Authors", "Source title", "Abstract", "Title", "Document Type", "Author Keywords", "Index Keywords", "Affiliations", "Year")]
+
+## Web of Science
+pp_wos_col <- pp_wos_dupl[, colnames(pp_wos_dupl) %in% c("Authors", "Publication Name", "Abstract", "Document Title", "Publication Type (J=Journal; B=Book; S=Series; P=Patent)", "Author Keywords", "Keywords Plus®", "Affiliation", "Year Published")]
+
+```
+# Estruturando as bases Scopus e WoS para futura junção
+
+Procedimentos realizados: alteração dos nomes das colunas, criação de uma variável para identifição de cada base e também o ordenamento das variáveis para futura junção.
+
+```{r, warning=FALSE}
+## Alterando nome das colunas - Scopus
+pp_scopus_colmud <- pp_scopus_col %>% rename(Autor = Authors,
+                                             Fonte = "Source title",
+                                             Resumo = Abstract,
+                                             Titulo = Title,
+                                             Tipo_Documento = "Document Type",
+                                             Autor_key = "Author Keywords",
+                                             Palavra_chave = "Index Keywords",
+                                             Afiliação = Affiliations,
+                                             Ano = Year)
+
+pp_scopus_colmud$Base <- "scopus"
+
+## Alterando nome das colunas - WoS
+
+pp_wos_colmud <- pp_wos_col %>% rename(Autor = Authors,
+                                       Fonte = "Publication Name",
+                                       Resumo = Abstract,   
+                                       Titulo = "Document Title",
+                                       Tipo_Documento = "Publication Type (J=Journal; B=Book; S=Series; P=Patent)",
+                                       Autor_key = "Author Keywords",     
+                                       Palavra_chave = "Keywords Plus®",
+                                       Afiliação = Affiliation,
+                                       Ano = "Year Published")
+
+pp_wos_colmud$Base <- "web of science"
+
+names(pp_scopus_colmud) == names(pp_wos_colmud) # verificando ordem das colunas
+
+pp_scopus_colmud <- pp_scopus_colmud[, match(names(pp_wos_colmud), names(pp_scopus_colmud))] # ordenando as colunas
+
+names(pp_scopus_colmud) == names(pp_wos_colmud) # verificando novamente a ordem das colunas
+
+```
+
+# Junção das bases Scopus e Web of Science
+
+Os arquivos correspondentes à Scopus e à Web of Science são agrupados por meio da função rbind, que exige o ordenamento das colunas (o que foi realizado anteriormente).
+
+* Nesta etapa, tem-se 2347 dados da Scopus e 706 da Wos, totalizando: 3053 registros
+
+```{r, warning=FALSE}
+
+#junção das bases 
+base <- rbind(pp_scopus_colmud, pp_wos_colmud)
+base <- as.data.frame(base)
+base$Titulo_limpo <- tolower(base$Titulo)
+
+# Remover caracteres indesejados
+unwanted_chars <- c("(", ")", "[", "]", "{", "}", "<", ">", ",", ";", ":", "?", "!", "@", "#", "$", "%", "^", "&", "*", "_", "-", "+", "=", "|", "\\", "/", "~", "`", "\"", "'", "’", "“", "”", "«", "»", "₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉", "₊", "₋", "₌", "₍", "₎")
+
+remove_unwanted_chars <- function(text, chars) {
+  # Escapar caracteres especiais em expressões regulares
+  escaped_chars <- sapply(chars, function(char) {
+    if (grepl("[\\^$.*+?()\\[\\]{}|]", char, perl = TRUE)) {
+      paste0("\\", char)
+    } else {
+      char
+    }
+  })
+
+  text <- str_replace_all(text, paste(escaped_chars, collapse = "|"), "")
+  return(text)
+}
+
+# Aplicar a função de remoção de caracteres indesejados no título
+base$Titulo_limpo <- sapply(base$Titulo_limpo, remove_unwanted_chars, chars = unwanted_chars)
+
+# writexl::write_xlsx(base, "base_juncao_scopus_wos_limpa.xlsx")
+
+```
+
+## Verificando duplicidades e ausências de observações 
+
+Na verificação de duplicidades entre as bases, identificou-se 488 documentos repetidos (fora 10 duplicidades anteriores da Scopus). 
+
+* Foram identificados, e excluídos, 89 registros sem o preenchimento (NA/Not Available) do campo "Resumo".
+* Cruzou-se a base de políticas com a de pesquisa, identificando-se 4 títulos repetidos:
+
+1. Prioritizing international agricultural research investments: lessons from a global multi-crop assessment
+2. What innovations impact agricultural productivity in Sub-Saharan Africa?
+3. Determinants and impacts of public agricultural research in Japan: Product level evidence on agricultural Kosetsushi
+4. How does public agricultural research impact society? A characterization of various patterns
+
+* Os títulos 1,3-4 foram excluídos da base de Políticas e mantidos na de Pesquisa. O título 4 estava com duas repetições na base de política. O título 2 foi retirado da base de Pesquisa.
+
+Os títulos excluídos da base podem ser acessados em: [Títulos excluídos](https://docs.google.com/spreadsheets/d/13KD2zQpRbsgQPh-TPn4e6p3BzMvvPWLp/edit?usp=sharing&ouid=108885149077301678625&rtpof=true&sd=true)
+
+```{r, warning=FALSE}
+
+base_dupl <- base[!duplicated(base$Titulo_limpo), ]#488 duplicatas, restando 2565
+base_dupl <- base_dupl[!is.na(base_dupl$Resumo), ] # 6 registros, restando 2559
+base_dupl <- subset(base_dupl, Resumo != "[No abstract available]") # retirada da anotação [no available], existente em alguns registros da base # 83 registros eliminados, restando 2476
+
+
+# retirando títulos manualmente
+
+# Vetor com os títulos para excluir
+titulos_excluir <- c("prioritizing international agricultural research investments lessons from a global multicrop assessment",
+                     "determinants and impacts of public agricultural research in japan product level evidence on agricultural kosetsushi",
+                     "how does public agricultural research impact society a characterization of various patterns")
+
+# Cria um novo DataFrame chamado 'base_pp_tit_dupl', que é um subconjunto do DataFrame 'base_dupl2'
+base_pp_tit_dupl <- subset(base_dupl, !(Titulo %in% titulos_excluir))
+
+
+# Salva um arquivo com os títulos duplicados, na, not available, duplicado entre bases:
+
+tit_dupl <- base[duplicated(base$Titulo_limpo), ]
+tit_dupl_na <- base[is.na(base$Resumo), ]
+tit_dupl_not <- subset(base, Resumo == "[No abstract available]") # retirada da anotação [no available], existentes em alguns registros da base
+tit_dupl_pp_pesq <- subset(base, (Titulo_limpo %in% titulos_excluir))
+
+titulos_duplicados <- rbind(tit_dupl, tit_dupl_na, tit_dupl_not, tit_dupl_pp_pesq)
+write_xlsx(titulos_duplicados, "titulos_duplicados_prisma.xlsx")
+
+```
+
+## Limpeza e transformação da base  
+
+Nesta etapa, busca-se iniciar a preparação do campo que servirá para a mineração de dados e modelagem de tópicos. Assim, serão retirados caracteres como aspas, hífens, pontuações etc. e palavras indesejadas, como artigos, preposições etc.
+
+* Palavras indesejadas: assumiu-se [Stopwords em inglês](https://rdrr.io/rforge/tm/man/stopwords.html), incluindo: "impact", "policy", "policies", "impacts", "assessment", "assess". 
+* Retirou-se, também, 62 publicações do ano de 2023.
+
+
+```{r}
+
+base <- filter(base_pp_tit_dupl, Ano != 2023) # retirada de 62 trabalhos do ano de 2023, restando 2414
+
+
+# Tolower case
+
+base$Resumo <- tolower(base$Resumo)
+base$Palavra_chave <- tolower(base$Palavra_chave)
+base$Autor_key <- tolower(base$Autor_key)
+
+# Criando nova variável a partir de outras três: resumo, palavra-chave e autor_key
+base <- base %>%
+  mutate(combined = paste(Resumo, Autor_key, Palavra_chave, sep = " "))
+
+
+# criando campo "década"
+base$Decada <- floor(base$Ano / 10) * 10
+
+# Expressão regular para capturar artigos relacionados a políticas públicas e avaliação de impacto
+policy <- "(policy|policies).*\\b(evaluation|impact|assessment)\\b|\\b(evaluation|impact|assessment)\\b.*(policy|policies)"
+
+# Aplicação da expressão regular
+policy_matches <- base[grepl(policy, base$Resumo, ignore.case = TRUE), ] #1371 não correspondem, restando 1043
+
+base <- policy_matches
+
+# Stopword - palavras indesejadas
+stopword_en <- c(stopwords("en"), "public", "also", "can", "study", "impact", "policy", "policies", "impacts", "assessment", "assess", "authors", "jonh", "press", "wiley", "springerverlag", "limited", "no", "abstract", "available", "taylor", "francis", "group", "ltd", "rights", "reserved", "this", "we", "old", "one", "an", "on", "of", "the", "in", "is", "of", "for the", "to the", "of the", "in the", "of a", "in this", "of this", "on the", "et", "al", "elsevier", "all","rights reserved", "open", "access", "springer", "licensee", "business", "media", "basel", "mdpi", "switzerland", "use", "results", "result", "show", "informa", "uk", "trading", "article", "exclusive", "licence", "distribuited", "terms", "creative", "attribuition", "author", "source", "credited", "license", "paper", "agricultural", "agriculture", "copyright", "copyrights", "john sons", "praeger", "publishers")
+
+# Nova função para remover stopwords
+remove_stopwords <- function(text, stopwords) {
+  words <- unlist(strsplit(text, "\\s+"))
+  words <- words[!words %in% stopwords]
+  return(paste(words, collapse = " "))
+}
+
+# Remover caracteres indesejados
+unwanted_chars <- c("(", ")", "[", "]", "{", "}", "<", ">", ",", ";", ":", "?", "!", "@", "#", "$", "%", "^", "&", "*", "_", "-", "+", "=", "|", "\\", "/", "~", "`", "\"", "'", "’", "“", "”", "«", "»", "₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉", "₊", "₋", "₌", "₍", "₎")
+
+remove_unwanted_chars <- function(text, chars) {
+  # Escapar caracteres especiais em expressões regulares
+  escaped_chars <- sapply(chars, function(char) {
+    if (grepl("[\\^$.*+?()\\[\\]{}|]", char, perl = TRUE)) {
+      paste0("\\", char)
+    } else {
+      char
+    }
+  })
+
+  text <- str_replace_all(text, paste(escaped_chars, collapse = "|"), "")
+  return(text)
+}
+
+# Aplicar a função de remoção de stopwords e caracteres indesejados na nova variável
+base$Resumo <- sapply(base$Resumo, remove_stopwords, stopwords = stopword_en)
+base$combined <- sapply(base$combined, remove_unwanted_chars, chars = unwanted_chars)
+
+
+```
+
+# Estatística Descritiva da Base
+
+Após a verificação de duplicidade e a limpeza da base, obteve-se um dataframe com 1045 observações e 10 variáveis. Foram identificados 12 tipos de documentos e a quantidade de publicações por ano, conforme dados abaixo.
+
+* Arquivo final utilizado para análise: [base_politica](https://docs.google.com/spreadsheets/d/18KHlZ1O4KO9jtcvVSoyKa46u8tE6vAgl/edit?usp=sharing&ouid=108885149077301678625&rtpof=true&sd=true)
+
+```{r, warning=FALSE}
+
+# Calcular quantidade de autores
+
+base$count_autor <- str_count(base$Autor, ",") + 1
+sum(base$count_autor)/1043 #3.67 autores por publicação
+
+# Calcular estatísticas descritivas
+base_distr <- table(base$Base)
+autor_distr <- table(base$count_autor)
+fonte_distr <- length(unique(base$Fonte))
+tipo_documento_distr <- table(base$Tipo_Documento)
+ano_distr <- table(base$Ano)
+
+
+# Dataframe para Base de Dados
+base_stats <- tibble(Category = "Base de Dados",
+                     Name = names(base_distr),
+                     Count = as.numeric(base_distr))
+
+# Dataframe para quantidade de autor
+autor_stats <- tibble(Category = "Quantidade de Autoria com",
+                      Name = paste(names(autor_distr), "Autor(es)"),
+                      Count = as.numeric(autor_distr))
+
+# Dataframe para quantidade de Fontes
+fonte_stats <- tibble(Category = "Quantidade de Fontes",
+                      Name = "Periódicos, Livros etc",
+                      Count = fonte_distr) 
+
+# Dataframe para Tipo de Documento
+tipo_documento_stats <- tibble(Category = "Tipo de Documento",
+                               Name = names(tipo_documento_distr),
+                               Count = as.numeric(tipo_documento_distr))
+
+# Dataframe para Ano
+ano_stats <- tibble(Category = "Ano",
+                    Name = names(ano_distr),
+                    Count = as.numeric(ano_distr))
+
+# Combinando os dataframes
+desc_stats <- rbind(base_stats, autor_stats, fonte_stats, tipo_documento_stats, ano_stats)
+
+# Carregar o pacote gt
+library(gt)
+
+# Criar tabela gt
+gt_table <- gt(desc_stats) %>%
+  tab_header(title = "Estatísticas Descritivas") %>%
+  cols_label(Category = "Categoria",
+             Name = "Nome",
+             Count = "Contagem")
+
+# Mostrar tabela gt
+gt_table
+gt_table <- as.data.frame(gt_table)
+
+# write_xlsx(gt_table, "estatistica_descritiva_pp_prisma.xlsx")
+
+gt_table
+
+```
+
+
+# Tokenização
+
+Nesta etapa são extraídas as principais palavras e grupos de termos do resumo.
+
+```{r, warning=FALSE}
+
+# Tokenização | Separando em N-grams 
+base_tokens_1 <- base %>%
+  unnest_tokens(output = palavra_resumo,
+                input = Resumo,
+                token = "ngrams",
+                n = 1,
+                stopwords = stopword_en)
+
+
+# Separando em N-gram de 2
+base_tokens_2 <- base %>%
+  unnest_tokens(output = palavra_resumo,
+                input = Resumo,
+                token = "ngrams",
+                n = 2,
+                stopwords = stopword_en)
+
+base_tokens_2_combined <- base %>%
+  unnest_tokens(output = combinados,
+                input = combined,
+                token = "ngrams",
+                n = 2,
+                stopwords = stopword_en)
+
+# Separando em N-gram de 3
+base_tokens_3 <- base %>%
+  unnest_tokens(output = palavra_resumo,
+                input = Resumo,
+                token = "ngrams",
+                n = 3,
+                stopwords = stopword_en)
+
+NFILTER <- 3
+
+contagem_one_gramm <- base_tokens_1 %>%
+  count(palavra_resumo,
+        sort = TRUE) %>% 
+  filter(n>=NFILTER)
+
+contagem_two_gramm <- base_tokens_2 %>%
+  count(palavra_resumo,
+        sort = TRUE) %>%
+  filter(n>=NFILTER) 
+
+contagem_two_gramm2 <- base_tokens_2 %>%
+  count(Decada, palavra_resumo,
+        sort = TRUE) %>%
+  filter(n>=NFILTER)
+
+contagem_two_gramm_combined_decada <- base_tokens_2_combined %>%
+  count(Decada, combinados,
+        sort = TRUE) %>%
+  filter(n>=NFILTER)
+
+contagem_two_gramm_combined <- base_tokens_2_combined %>%
+  count(combinados,
+        sort = TRUE) %>%
+  filter(n>=NFILTER)
+
+
+contagem_three_gramm <- base_tokens_3 %>%
+  count(Decada, palavra_resumo,
+        sort = TRUE) %>%
+  filter(n>=NFILTER)
+
+```
+
+## Visualização gráfica dos tokens
+### Ngrams
+```{r, warning=FALSE}
+
+contagem_one_gramm %>% filter(n > 400) %>% 
+  ggplot(mapping = aes(x = n, y = reorder(palavra_resumo, n), fill= n))+
+  geom_col(show.legend = FALSE)+
+  labs(title = "Palavras | Ngram",
+       caption = "Gráfico do quantitativo de palavras de NGRAMS > que 400",
+       x = "Quantidade",
+       y = "Palavras - Ngram")
+
+```
+
+### Bigrams
+```{r, warning=FALSE}
+
+contagem_two_gramm %>% filter(n > 40) %>% 
+  ggplot(mapping = aes(x = n, y = reorder(palavra_resumo, n), fill= n))+
+  geom_col(show.legend = FALSE)+
+  labs(title = "Palavras | Bigram",
+       caption = "Gráfico do quantitativo de palavras de BIGRAMS > que 40",
+       x = "Quantidade",
+       y = "Palavras - Ngram")+
+  theme_minimal()
+
+```
+```{r, warning=FALSE}
+
+n_palavras <- 200
+
+contagem_two_gramm <- head(contagem_two_gramm_combined, n_palavras)
+
+contagem_two_gramm$cor <- "darkblue"
+
+nuvem <- wordcloud2(contagem_two_gramm, size = 0.7, color = contagem_two_gramm$cor, backgroundColor = "white")
+
+nuvem
+
+# webshot::install_phantomjs()
+
+saveWidget(nuvem,"nuvem_pp.html",selfcontained = F)
+# webshot::webshot("nuvem_pp.html","nuvem_pp.png",vwidth = 1992, vheight = 1744, delay =10)
+
+# write_xlsx(contagem_two_gramm_combined_decada, "bigram_pp_combinado_decada_prisma.xlsx")
+# write_xlsx(contagem_two_gramm2, "bigram_resumo_decada.xlsx")
+```
+
+
+<div style="text-align:center;">
+  <img src="pp_cloud.png" alt="Nuvem - Bigram" width="500" height="500" />
+</div>
+
+### Trigrams
+```{r, warning=FALSE}
+contagem_three_gramm <- contagem_three_gramm[-1, ]
+
+head(contagem_three_gramm, 20) %>% 
+  ggplot(mapping = aes(x = n, y = reorder(palavra_resumo, n), fill= n))+
+  geom_col(show.legend = FALSE)+
+  labs(title = "Palavras | Trigram",
+       caption = "Gráfico do quantitativo de palavras de TRIGRAMS > que 20",
+       x = "Quantidade",
+       y = "Palavras - Ngram")+
+  theme_minimal()
+
+# write_xlsx(contagem_three_gramm, "metodos.xlsx")
+
+```
+
+
+# Métodos identificados
+Nesta etapa, explorou-se as "palavras-chave" e "palavras-chave_autor" para descobrir os métodos mais usados nos estudos
+
+```{r}
+# Analisando as palavras-chave do autor e as indexadas pelas bases 
+metodos_1 <- base %>%
+  unnest_tokens(output = metodologia,
+                input = Autor_key,
+                token = "ngrams",
+                n = 3,
+                stopwords = stopword_en)
+
+
+# Separando em N-gram de 2
+metodos_2 <- base %>%
+  unnest_tokens(output = metodologia,
+                input = Palavra_chave,
+                token = "ngrams",
+                n = 3,
+                stopwords = stopword_en)
+
+NFILTER <- 3
+
+metodo_autor <- metodos_1 %>%
+  count(metodologia,
+        sort = TRUE) %>% 
+  filter(n>=NFILTER)
+
+metodo_keywords <- metodos_2 %>%
+  count(metodologia,
+        sort = TRUE) %>%
+  filter(n>=NFILTER)
+
+# write_xlsx(metodo_keywords, "pp/pp_metodos.xlsx")
+
+# metodos_pp <- read_excel("pp/pp_metodos_analisados.xlsx")
+
+# table(metodos_pp$categoria)
+
+# metodos_pp %>% 
+#   ggplot(mapping = aes(x = n, y = reorder(categoria, n), fill= n))+
+#   geom_col(show.legend = FALSE)+
+#   labs(title = "Categorias dos métodos identificados",
+#        caption = "Relação das categorias criadas, por método identificado",
+#        x = "Quantidade",
+#        y = "Categoria do Método")+
+#   theme_minimal()
+
+```
+
+
+# Resultados
+## Quantidade de trabalhos por ano/base
+```{r, warning=FALSE}
+ano_base <- cbind(base$Ano, base$Base)
+ano_base <- as.data.frame(ano_base)
+
+names(ano_base)[names(ano_base) == "V1"] <- "ano"
+names(ano_base)[names(ano_base) == "V2"] <- "base"
+
+contagem_ano <- as.data.frame(table(Ano = ano_base$ano, Base = ano_base$base))
+contagem_ano_filtrado <- contagem_ano %>% filter(Ano != 2023)
+
+ggplot(contagem_ano_filtrado, aes(x = Ano, y = Freq, fill = Base)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_x_discrete(guide = guide_axis(angle = 90, check.overlap = TRUE)) +
+  labs(x = "Ano", y = "Contagem", fill = "Base de Dados") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))+
+  scale_fill_manual(values = c("darkblue", "lightblue"))
+
+```
+
+## Modelagem de tópicos - Resumo
+
+Nesta etapa aplica-se um modelo para identificação de tópicos principais dos trabalhos analisados. 
+
+* Foram definidos 06 grupos de tópicos, conforme gráfico abaixo. 
+```{r, warning=FALSE}
+# corpus_base <- Corpus(VectorSource(base$Resumo))
+corpus_base <- Corpus(VectorSource(base$combined))
+# corpus_base2 <- Corpus(VectorSource(paste(base$Resumo, base$Autor_key, base$Palavra_chave, sep = ",")))
+# paste(base$Resumo, base$Autor_key, base$Palavra_chave, sep = ",")
+#Convert all text to lower case
+corpus_base<-tm_map(corpus_base, content_transformer(tolower))
+#Remove numbers from the text 
+corpus_base<-tm_map(corpus_base, removeNumbers)
+#Remove stopwords in English
+corpus_base<-tm_map(corpus_base, removeWords, stopword_en)
+
+#Remove punctuation
+corpus_base<-tm_map(corpus_base, removePunctuation, preserve_intra_word_dashes = TRUE)
+#Remove white Spaces 
+corpus_base<-tm_map(corpus_base, stripWhitespace)#remove white spaces
+corpus_base <- tm_map(corpus_base, stemDocument, language = "english") # stemizando
+
+
+### Criando a Matrix
+matrix_base <- DocumentTermMatrix(corpus_base)
+matrix_base
+
+#### Rodando o Modelo 
+modelo_lda <- LDA(matrix_base, k=6, method = "Gibbs",
+                  control=list(seed=1234))
+
+#### Step7: The beta values from the model is evaluated to determine the probability of a word being associated with a topic
+beta_topics <- tidy(modelo_lda, matrix ="beta")
+
+#Grouping the terms by topic
+beta_top_terms <- beta_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+
+#### Display the grouped terms on the charts 
+grupos_pp <- beta_top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+
+ggsave("grupos_topicos6_prisma.png", width = 12, height = 8)
+
+grupos_pp
+
+write_xlsx(beta_top_terms, "beta_topicos_prisma.xlsx")
+
+```
+
+
+## Quantidade de trabalhos por tópicos
+
+```{r}
+
+matriz_triplet <- modelo_lda@wordassignments
+matriz_comum <- as.matrix(matriz_triplet)
+
+nmod <- length(unique(c(matriz_comum)))
+
+colnames(matriz_comum) <- modelo_lda@terms
+
+table(matriz_comum[1,])
+
+n_dummy <- nrow(matriz_comum)
+matriz_dummy <- matrix(data = rep(0:(nmod-1), each = n_dummy), nrow = n_dummy)
+
+matriz_comum <- cbind(matriz_comum, matriz_dummy)
+
+matriz_apply1 <- apply(matriz_comum, 1, table)
+
+matriz_transposta <- t(matriz_apply1)
+
+matriz_final <- matriz_transposta - 1
+
+maior_valor <- apply(matriz_final[, -1], 1, which.max)
+maior_valor
+
+base$topic_max <- maior_valor
+
+View(base)
+
+porcentagem <- matriz_final[, -1]
+porcentagem <- apply(porcentagem, 1, function(x) 100*x/sum(x))
+porcentagem <- t(porcentagem)
+
+porcentagem <- round(porcentagem, 2)
+porcentagem[1, ]
+
+sum(porcentagem[1, ])
+table(base$topic_max)
+
+# write_xlsx(base, "base_com_topicos_prisma.xlsx")
+
+```
+
+
+
+# Outra Abordagem para obter o número de grupos
+```{r, warning=FALSE, echo=FALSE}
+
+library(cluster)
+
+# Pré-processar os dados
+corpus<- Corpus(VectorSource(base$Resumo))
+corpus <- tm_map(corpus, tolower)
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeWords, stopwords("english"))
+corpus <- tm_map(corpus, stemDocument)
+
+dtm <- DocumentTermMatrix(corpus)
+
+dtm_matrix <- as.matrix(dtm)
+
+# Escolher o número de clusters
+wss <- sapply(1:15, function(k) {
+  kmeans(dtm_matrix, k, nstart = 5)$tot.withinss
+})
+
+plot(1:15, wss, type="b", pch=19, frame=FALSE, 
+     xlab="Number of clusters",
+     ylab="Total within-clusters sum of squares")
+
+# Aplicar o algoritmo de clusterização
+k <- 6
+set.seed(123)
+km <- kmeans(dtm_matrix, k)
+
+# Avaliar a qualidade da clusterização
+silhouette(km$cluster, dist(dtm_matrix))
+
+# Interpretar os clusters
+terms <- rownames(dtm)
+cluster_df <- data.frame(terms, cluster = km$cluster)
+
+
+```
+
+
+
+
+# Países
+
+Identificação dos países com o maior número de estudo. Para isso, foi utilizado o campo "Afiliação". 
+* Foram identificados 113 países, em que os dez primeiros foram: United States; Brazil; United Kingdom; China; France; Australia; India; Mexico; Canada; Netherlands.
+
+```{r, warning=FALSE}
+
+countrynames_pp <- readRDS("C:/Users/danie/Projetos R//TCC MBA/countrynames.RDS")
+countrynames_pp <- c(countrynames_pp, "United States", "Sem Dado") 
+
+afi_pp <- base$Afiliação
+
+lista_paises_pp <- lapply(X = afi_pp, function(y) lapply(X = countrynames_pp, function(x) grepl(pattern = x, x = y)
+                                   ))
+paises_unlist_pp <- lapply(X = lista_paises_pp, unlist) 
+
+paises_pp <- lapply(X = paises_unlist_pp, function(x) countrynames_pp[x])
+
+size_paises_pp <- lapply(X = paises_pp, FUN = length)
+
+
+base <- mutate(.data = base, pais = as.character(paises_pp))
+writexl::write_xlsx(x = base, path = "base_paises_pp_prisma.xlsx")
+
+count_paises_pp <- table(unlist(paises_pp))
+count_paises_pp <- as.data.frame(count_paises_pp)
+
+names(count_paises_pp)[names(count_paises_pp) == "Var1"] <- "País"
+names(count_paises_pp)[names(count_paises_pp) == "Var2"] <- "Freq"
+
+# Ordenar o data frame pela frequência dos países em ordem decrescente
+count_paises_pp <- count_paises_pp %>%
+  arrange(desc(Freq))
+
+base$cont_pais <- sapply(base$pais, 
+                          function(x) case_when(startsWith(x, "c(") ~ str_count(x, ",")+1, 
+                                                startsWith(x, "cha") ~ 0,
+                                                TRUE ~ 1))
+print(count_paises_pp)
+
+# Criando uma tabela bonita com kable
+kable(count_paises_pp, caption = "Países e suas frequências de ocorrência", align = "c")
+
+count_paises_pp %>%
+  filter(Freq > 30) %>%
+  ggplot(aes(x = reorder(País, -Freq), y = Freq)) +
+  geom_bar(stat = "identity", show.legend = FALSE, fill="darkblue") +
+  theme_minimal() +
+  labs(title = "Frequência de ocorrência dos países", x = "Países", y = "Frequência") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, color = "blue")) 
+
+```
+
+# Tendências ao longo dos anos
+
+[Tendência em Políticas Públicas Agrícolas](https://www.canva.com/design/DAFfjE8BzKU/view)
+ 
+
+# Identificação de novas metodologias a partir de lista
+
+Com a identificação de metodologias utilizadas em avaliações de impactos, descritas nos referenciais de Araújo (2022) e IDIS (2018), produziu-se uma listagem contendo cerca de 60 métodos. A partir disso, relacionou-se a lista de métodos com a base de dados, a partir do campo "Abstract". 
+
+* Com essa abordagem, foram identificadas ocorrências de métodos em 1007 trabalhos, ou 35% da base.
+
+
+```{r, warning=FALSE}
+# Carregar pacote necessário
+library(stringr)
+library(fuzzyjoin)
+
+####### Dicionário/vocabulário ####### 
+
+dicionario <- read_excel("dicionario_metodologia.xlsx")
+
+names(dicionario)
+
+dicionario$termos <- tolower(dicionario$termos)
+
+colnames(dicionario) <- c("CONCEITO", "sinonimos")
+
+dicionario <- dicionario %>%
+  mutate(metodologia = tools::toTitleCase(CONCEITO),
+         termos = tolower(sinonimos))
+
+dicionario <- apply(dicionario, 2, function(x) gsub(";", ",", x))
+dicionario <- as.data.frame(dicionario)
+
+
+#search each term of the dic in the text
+
+dic <- dicionario$sinonimos
+
+df_human <- data.frame(matrix(nrow = nrow(base), ncol = 0))
+df_ml <- data.frame(matrix(nrow = nrow(base), ncol = 0))
+for(dic_ind in 1:nrow(dicionario)){
+    print(dicionario$CONCEITO[dic_ind])
+    dic_term <- unlist(str_split(dicionario$sinonimos[dic_ind], ", "))
+    res <- c()
+    res2 <- c()
+    for(line in 1:nrow(base)){
+        text <- base$combined[line]
+        text <- str_replace_all(text, "[[:punct:]]", "")
+        detect <- sapply(dic_term, function(x) grepl(x, text))
+        ml <- as.numeric(any(detect))
+        detect <- names(detect)[detect]
+        detect <- paste(detect, collapse = ", ")
+        res <- c(res, detect)
+        res2 <- c(res2, ml)
+    }
+    df_human[, dicionario$CONCEITO[dic_ind]] <- res
+    df_ml[, dicionario$CONCEITO[dic_ind]] <- res2
+}
+
+contagem_df_ml <- apply(df_ml, 2, table)
+
+unclassified <- rowSums(df_ml) == 0 
+
+table(unclassified)
+classified <- !unclassified #68% da base classificada, com 712 estudos mapeados e 331 sem identificação - detalhe: variável "combined"
+
+df_ml <- (apply(df_ml, 1, function(x) ifelse(x == 1, TRUE, FALSE)))
+df_ml <- t(df_ml)
+classes <- colnames(df_ml)
+
+base$metodologia_ml <- apply(df_ml, 1, function(x) paste(classes[x], collapse = ", "))
+
+ml_decada <- cbind(base$Decada, df_ml)
+
+colnames(ml_decada)[1] <- "decada"
+
+ml_decada <- as.data.frame(ml_decada)
+
+matriz_ml_decada <- ml_decada %>% 
+  dplyr::group_by(decada) %>% 
+  dplyr::summarise_each(list(sum))
+
+write_xlsx(matriz_ml_decada, "matriz_decada_classesml_prisma.xlsx")
+write_xlsx(base, "base_combined_ml_prisma.xlsx")
+write_xlsx(dicionario, "dicionario_convertido_prisma.xlsx")
+
+
+```
+```{r}
+amostra_2022 <- base %>% 
+  filter(Ano == 2022)
+
+amostra_2022 <- sample_n(amostra_2022, 10)
+
+write_xlsx(amostra_2022, "amostra2022.xlsx")
+
+
+
+```
+
